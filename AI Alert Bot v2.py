@@ -45,16 +45,17 @@ Only alert if ALL hard filters pass with high conviction.
 # ====================== TOOLS ======================
 TOOLS = [
     {
-        "name": "get_flow_alerts",
-        "description": "Get recent options flow for a custom filter.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "filter_name": {"type": "string"},
-                "limit": {"type": "integer", "default": 30}
-            }
+    "name": "get_flow_alerts",
+    "description": "Get recent options flow. Can be for a specific ticker or broad scan.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "ticker": {"type": "string", "description": "Specific ticker like DVN, QQQ, SPY (optional)"},
+            "filter_name": {"type": "string", "description": "Custom filter name if using one"},
+            "limit": {"type": "integer", "default": 20}
         }
     }
+}
 ]
 
 # ====================== EXECUTE TOOL ======================
@@ -65,18 +66,36 @@ async def execute_tool(tool_name: str, tool_input: dict):
         base_url = "https://api.unusualwhales.com"
 
         if tool_name == "get_flow_alerts":
-            params = {"limit": min(tool_input.get("limit", 30), 40)}
+            # Support both broad scan and ticker-specific
+            ticker = tool_input.get("ticker")
+            if ticker:
+                # Ticker-specific (best for user queries like "DVN")
+                url = f"{base_url}/api/stock/{ticker}/flow-alerts"
+                params = {"limit": min(tool_input.get("limit", 20), 50)}
+            else:
+                # Broad scan for auto-alerts or general questions
+                url = f"{base_url}/api/option-trades/flow-alerts"
+                params = {"limit": min(tool_input.get("limit", 30), 40)}
+
             async with httpx.AsyncClient(timeout=15.0) as client:
-                resp = await client.get(f"{base_url}/api/option-trades/flow-alerts", headers=headers, params=params)
-                data = resp.json() if resp.status_code == 200 else {"error": resp.text}
+                resp = await client.get(url, headers=headers, params=params)
+                
+                if resp.status_code != 200:
+                    return {"error": f"API error {resp.status_code}: {resp.text}"}
+                
+                data = resp.json()
+                
+                # Truncate for safety
                 if isinstance(data, dict) and isinstance(data.get("data"), list):
                     return {
-                        "filter": tool_input.get("filter_name"),
+                        "filter": tool_input.get("filter_name") or ticker or "broad",
                         "count": len(data["data"]),
-                        "samples": data["data"][:12]
+                        "samples": data["data"][:15],
+                        "note": f"Showing up to 15 results for {ticker or 'broad scan'}."
                     }
                 return data
-        return {"error": "Unknown tool"}
+
+        return {"error": f"Unknown tool: {tool_name}"}
     except Exception as e:
         return {"error": str(e)}
 
