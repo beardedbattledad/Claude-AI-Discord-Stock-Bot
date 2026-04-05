@@ -68,43 +68,50 @@ async def execute_tool(tool_name: str, tool_input: dict):
         base_url = "https://api.unusualwhales.com"
 
         if tool_name == "get_flow_alerts":
-            params = {
-                "limit": min(tool_input.get("limit", 30), 40),           # Prevent huge responses
-                "min_premium": tool_input.get("min_premium", 100000),
-            }
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                resp = await client.get(f"{base_url}/api/option-trades/flow-alerts", headers=headers, params=params)
+            ticker = tool_input.get("ticker")
+            limit = min(tool_input.get("limit", 200), 200)   # Max per call is ~200
+            since_hours = tool_input.get("since_hours")
+
+            params = {"limit": limit}
+
+            if since_hours:
+                # User specifically asked for a time window
+                cutoff = (datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=since_hours)).isoformat()
+                params["newer_than"] = cutoff
+
+            if ticker:
+                url = f"{base_url}/api/stock/{ticker.upper()}/flow-alerts"
+            else:
+                url = f"{base_url}/api/option-trades/flow-alerts"
+
+            print(f"→ Calling {url} | limit={limit} | since_hours={since_hours}")
+
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                resp = await client.get(url, headers=headers, params=params)
+                print(f"→ Status: {resp.status_code}")
+
                 data = resp.json() if resp.status_code == 200 else {"error": resp.text}
 
-                # Truncate for safety
                 if isinstance(data, dict) and isinstance(data.get("data"), list):
+                    results = data["data"]
                     return {
-                        "count": len(data["data"]),
-                        "samples": data["data"][:10],   # Only send first 10 items to Claude
-                        "note": "Showing first 10 results. Ask for more specific ticker if needed."
+                        "count": len(results),
+                        "samples": results[:150],   # Send up to 150 to Claude (safe limit)
+                        "ticker": ticker or "broad",
+                        "note": f"Most recent {len(results)} trades (max per call ~200)"
                     }
                 return data
 
+        # Keep your other tools (dark_pool, congress, insider) unchanged
         elif tool_name == "get_dark_pool_trades":
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.get(f"{base_url}/api/darkpool/recent", headers=headers, params={"limit": tool_input.get("limit", 15)})
-                data = resp.json() if resp.status_code == 200 else {"error": resp.text}
-                return {"count": len(data) if isinstance(data, list) else 0, "samples": data[:6] if isinstance(data, list) else data}
+            # ... your existing code for this tool
+            pass
 
-        elif tool_name == "get_congress_trades":
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.get(f"{base_url}/api/congress/recent-trades", headers=headers, params={"limit": tool_input.get("limit", 10)})
-                data = resp.json() if resp.status_code == 200 else {"error": resp.text}
-                return data
-
-        elif tool_name == "get_insider_trades":
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.get(f"{base_url}/api/insider/transactions", headers=headers, params={"limit": tool_input.get("limit", 10)})
-                data = resp.json() if resp.status_code == 200 else {"error": resp.text}
-                return data
+        # ... same for congress and insider
 
         return {"error": f"Unknown tool: {tool_name}"}
     except Exception as e:
+        print(f"Tool error: {str(e)}")
         return {"error": str(e)}
 
 # ====================== HANDLE TOOL LOOP ======================
