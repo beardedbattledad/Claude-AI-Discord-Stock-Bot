@@ -173,7 +173,7 @@ def is_market_open():
     return (now.hour > 9 or (now.hour == 9 and now.minute >= 30)) and now.hour < 16
 
 # ====================== AUTO ALERT SCANNER (New - uses your rules) ======================
-@tasks.loop(seconds=90)   # Changed to 90 seconds
+@tasks.loop(seconds=90)   # Slower base loop
 async def auto_alert_scanner():
     if not is_market_open():
         return
@@ -196,14 +196,21 @@ async def auto_alert_scanner():
             if "error" in tool_result or not tool_result.get("samples"):
                 continue
 
-            # Much lighter system prompt for auto-alerts
-            system_prompt = "You are scanning options flow for high-conviction alerts only. Apply the user's strict rules. Return ONLY a short alert if it passes all hard filters. If nothing qualifies, return exactly: NO_ALERT"
+            # HEAVILY TRUNCATED data for auto-alerts
+            light_data = {
+                "filter": filter_name,
+                "count": tool_result.get("count", 0),
+                "samples": tool_result.get("samples", [])[:8]   # Only 8 samples max
+            }
+
+            # Very short system prompt
+            system_prompt = "Scan flow for high-conviction alerts ONLY. Apply strict rules. Return short alert if it passes all hard filters. Else return exactly: NO_ALERT"
 
             response = await ANTHROPIC.messages.create(
                 model="claude-sonnet-4-6",
-                max_tokens=250,          # Reduced
+                max_tokens=200,           # Very low
                 temperature=0.0,
-                messages=[{"role": "user", "content": f"Filter: {filter_name}\nData: {json.dumps(tool_result, default=str)[:8000]}"}],  # Truncate data heavily
+                messages=[{"role": "user", "content": json.dumps(light_data, default=str)}],
                 system=system_prompt
             )
 
@@ -215,7 +222,11 @@ async def auto_alert_scanner():
                     await channel.send(format_short_alert(tool_result["samples"][0]))
 
         except Exception as e:
-            print(f"Auto-alert error for {filter_name}: {e}")
+            if "rate_limit" in str(e).lower():
+                print("Rate limit hit - sleeping 10s")
+                await asyncio.sleep(10)
+            else:
+                print(f"Auto-alert error for {filter_name}: {e}")
 
         setattr(auto_alert_scanner, last_run_attr, datetime.datetime.now(datetime.UTC))
 
