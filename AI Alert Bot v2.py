@@ -173,7 +173,7 @@ def is_market_open():
     return (now.hour > 9 or (now.hour == 9 and now.minute >= 30)) and now.hour < 16
 
 # ====================== AUTO ALERT SCANNER (New - uses your rules) ======================
-@tasks.loop(seconds=30)
+@tasks.loop(seconds=90)   # Changed to 90 seconds
 async def auto_alert_scanner():
     if not is_market_open():
         return
@@ -196,16 +196,14 @@ async def auto_alert_scanner():
             if "error" in tool_result or not tool_result.get("samples"):
                 continue
 
-            system_prompt = f"""You are scanning flow for high-conviction alerts ONLY.
-Apply the user's strict Trading Rules exactly.
-Return ONLY a short alert if something passes ALL hard filters and is worth alerting.
-If nothing meets criteria, return exactly: NO_ALERT"""
+            # Much lighter system prompt for auto-alerts
+            system_prompt = "You are scanning options flow for high-conviction alerts only. Apply the user's strict rules. Return ONLY a short alert if it passes all hard filters. If nothing qualifies, return exactly: NO_ALERT"
 
             response = await ANTHROPIC.messages.create(
                 model="claude-sonnet-4-6",
-                max_tokens=400,
+                max_tokens=250,          # Reduced
                 temperature=0.0,
-                messages=[{"role": "user", "content": f"Filter: {filter_name}\nData: {json.dumps(tool_result)}"}],
+                messages=[{"role": "user", "content": f"Filter: {filter_name}\nData: {json.dumps(tool_result, default=str)[:8000]}"}],  # Truncate data heavily
                 system=system_prompt
             )
 
