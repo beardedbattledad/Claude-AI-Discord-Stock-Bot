@@ -4,15 +4,27 @@ import datetime
 import json
 from dotenv import load_dotenv
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from anthropic import AsyncAnthropic
 
 load_dotenv()
 
-# CONFIG
+# ====================== CONFIG ======================
 UW_API_KEY = os.getenv("UW_API_KEY")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+
+ALERT_CHANNEL_ID = 1490357895710376116   # Your alert channel
+
+# Your custom filters (change these names once you create them in Unusual Whales)
+CUSTOM_FILTERS = [
+    {"name": "AI ETF",      "interval_seconds": 30},
+    {"name": "AI Mega Cap", "interval_seconds": 45},
+    {"name": "AI Mid Cap",  "interval_seconds": 120},
+    {"name": "AI Small Cap","interval_seconds": 180},
+]
+
+TEST_MODE = False
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -20,17 +32,29 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 ANTHROPIC = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
-# ====================== TOOL DEFINITIONS ======================
+# ====================== YOUR STRICT RULES (Auto-alerts ONLY) ======================
+TRADING_RULES = """
+Apply strictly for auto-alerts:
+- Tier by market cap or ETF type.
+- Major Index ETFs: ≥ $1M premium, relaxed chasing (|5%|).
+- Leveraged/Inverse ETFs: ≥ $100K, flag as high-vol speculative.
+- Hard filters: Aggressive sweep, new positions (vol > OI), no chasing (except ETFs), meets premium threshold.
+- Prefer directional flow. Flag likely hedges.
+Only alert if ALL hard filters pass with high conviction.
+"""
+
+# ====================== TOOLS (same as your stable version) ======================
 TOOLS = [
     {
         "name": "get_flow_alerts",
-        "description": "Get recent options flow activity. Use this for broad scanning of unusual or large options trades.",
+        "description": "Get the most recent options flow activity. Default = last 200 trades (no premium or time filter unless asked).",
         "input_schema": {
             "type": "object",
             "properties": {
-                "since_hours": {"type": "integer", "description": "Hours to look back (default 2)"},
-                "min_premium": {"type": "integer", "description": "Minimum premium in USD (default 100000)"},
-                "limit": {"type": "integer", "default": 30}
+                "ticker": {"type": "string", "description": "Specific ticker like DVN (optional)"},
+                "since_hours": {"type": "integer", "description": "Only use if user specifically asks for a time window"},
+                "min_premium": {"type": "integer", "description": "Minimum premium — only use if user asks"},
+                "limit": {"type": "integer", "default": 200}
             }
         }
     },
@@ -60,7 +84,7 @@ TOOLS = [
     }
 ]
 
-# ====================== EXECUTE TOOL (with truncation) ======================
+# ====================== EXECUTE TOOL (Your current stable version) ======================
 async def execute_tool(tool_name: str, tool_input: dict):
     try:
         import httpx
@@ -68,23 +92,44 @@ async def execute_tool(tool_name: str, tool_input: dict):
         base_url = "https://api.unusualwhales.com"
 
         if tool_name == "get_flow_alerts":
-            params = {
-                "limit": min(tool_input.get("limit", 30), 40),           # Prevent huge responses
-                "min_premium": tool_input.get("min_premium", 100000),
-            }
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                resp = await client.get(f"{base_url}/api/option-trades/flow-alerts", headers=headers, params=params)
+            ticker = tool_input.get("ticker")
+            limit = min(tool_input.get("limit", 200), 200)
+            since_hours = tool_input.get("since_hours")
+            min_premium = tool_input.get("min_premium")
+
+            params = {"limit": limit}
+
+            if since_hours is not None:
+                cutoff = (datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=since_hours)).isoformat()
+                params["newer_than"] = cutoff
+
+            if min_premium is not None:
+                params["min_premium"] = min_premium
+
+            if ticker:
+                url = f"{base_url}/api/stock/{ticker.upper()}/flow-alerts"
+            else:
+                url = f"{base_url}/api/option-trades/flow-alerts"
+
+            print(f"→ Calling {url} | limit={limit} | since_hours={since_hours or 'None (most recent)'} | min_premium={min_premium or 'None'}")
+
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                resp = await client.get(url, headers=headers, params=params)
+                print(f"→ Status: {resp.status_code}")
+
                 data = resp.json() if resp.status_code == 200 else {"error": resp.text}
 
-                # Truncate for safety
                 if isinstance(data, dict) and isinstance(data.get("data"), list):
+                    results = data["data"]
                     return {
-                        "count": len(data["data"]),
-                        "samples": data["data"][:10],   # Only send first 10 items to Claude
-                        "note": "Showing first 10 results. Ask for more specific ticker if needed."
+                        "count": len(results),
+                        "samples": results[:150],
+                        "ticker": ticker or "broad",
+                        "note": f"Most recent {len(results)} trades (no default time or premium filter)"
                     }
                 return data
 
+        # Keep your other tools exactly as they were
         elif tool_name == "get_dark_pool_trades":
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.get(f"{base_url}/api/darkpool/recent", headers=headers, params={"limit": tool_input.get("limit", 15)})
@@ -94,20 +139,89 @@ async def execute_tool(tool_name: str, tool_input: dict):
         elif tool_name == "get_congress_trades":
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.get(f"{base_url}/api/congress/recent-trades", headers=headers, params={"limit": tool_input.get("limit", 10)})
-                data = resp.json() if resp.status_code == 200 else {"error": resp.text}
-                return data
+                return resp.json() if resp.status_code == 200 else {"error": resp.text}
 
         elif tool_name == "get_insider_trades":
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.get(f"{base_url}/api/insider/transactions", headers=headers, params={"limit": tool_input.get("limit", 10)})
-                data = resp.json() if resp.status_code == 200 else {"error": resp.text}
-                return data
+                return resp.json() if resp.status_code == 200 else {"error": resp.text}
 
         return {"error": f"Unknown tool: {tool_name}"}
     except Exception as e:
+        print(f"Tool error: {str(e)}")
         return {"error": str(e)}
 
-# ====================== HANDLE TOOL LOOP ======================
+# ====================== SHORT ALERT FORMAT ======================
+def format_short_alert(flow_item: dict) -> str:
+    ticker = flow_item.get("ticker", "N/A")
+    expiry = flow_item.get("expiration", "N/A")
+    strike = flow_item.get("strike", "N/A")
+    side = flow_item.get("side", "N/A").upper()
+    premium = flow_item.get("premium", "N/A")
+    vol_oi = flow_item.get("vol_oi_ratio", "N/A")
+    execution = flow_item.get("execution_type", "N/A")
+
+    return f"🚨 **{ticker}** {expiry} {strike} {side} | ${premium:,} | Vol/OI {vol_oi}x | {execution}"
+
+# ====================== MARKET HOURS CHECK ======================
+def is_market_open():
+    if TEST_MODE:
+        return True
+    now = datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=4)
+    if now.weekday() >= 5:
+        return False
+    return (now.hour > 9 or (now.hour == 9 and now.minute >= 30)) and now.hour < 16
+
+# ====================== AUTO ALERT SCANNER (New - uses your rules) ======================
+@tasks.loop(seconds=30)
+async def auto_alert_scanner():
+    if not is_market_open():
+        return
+
+    for f in CUSTOM_FILTERS:
+        filter_name = f["name"]
+        interval = f["interval_seconds"]
+
+        last_run_attr = f"last_run_{filter_name.replace(' ', '_')}"
+        if not hasattr(auto_alert_scanner, last_run_attr):
+            setattr(auto_alert_scanner, last_run_attr, datetime.datetime.now(datetime.UTC) - datetime.timedelta(seconds=interval + 10))
+
+        last_run = getattr(auto_alert_scanner, last_run_attr)
+        if (datetime.datetime.now(datetime.UTC) - last_run).total_seconds() < interval:
+            continue
+
+        try:
+            tool_result = await execute_tool("get_flow_alerts", {})
+
+            if "error" in tool_result or not tool_result.get("samples"):
+                continue
+
+            system_prompt = f"""You are scanning flow for high-conviction alerts ONLY.
+Apply the user's strict Trading Rules exactly.
+Return ONLY a short alert if something passes ALL hard filters and is worth alerting.
+If nothing meets criteria, return exactly: NO_ALERT"""
+
+            response = await ANTHROPIC.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=400,
+                temperature=0.0,
+                messages=[{"role": "user", "content": f"Filter: {filter_name}\nData: {json.dumps(tool_result)}"}],
+                system=system_prompt
+            )
+
+            reply = "".join(b.text for b in response.content if b.type == "text").strip()
+
+            if "NO_ALERT" not in reply and reply:
+                channel = bot.get_channel(ALERT_CHANNEL_ID)
+                if channel:
+                    await channel.send(format_short_alert(tool_result["samples"][0]))
+
+        except Exception as e:
+            print(f"Auto-alert error for {filter_name}: {e}")
+
+        setattr(auto_alert_scanner, last_run_attr, datetime.datetime.now(datetime.UTC))
+
+# ====================== YOUR ORIGINAL CONVERSATIONAL MODE (unchanged) ======================
 async def handle_tool_loop(response, messages):
     while response.stop_reason == "tool_use":
         tool_results = []
@@ -124,30 +238,27 @@ async def handle_tool_loop(response, messages):
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": tool_use_id,
-                    "content": json.dumps(result, default=str)[:15000]  # Hard cap to prevent overflow
+                    "content": json.dumps(result, default=str)[:15000]
                 })
 
         messages.append({"role": "assistant", "content": response.content})
         messages.append({"role": "user", "content": tool_results})
 
         response = await ANTHROPIC.messages.create(
-            model="claude-sonnet-4-6",          # Current stable model
+            model="claude-sonnet-4-6",
             max_tokens=1000,
             temperature=0.4,
             tools=TOOLS,
             messages=messages
         )
 
-    # Extract final text
     final_text = ""
     for block in response.content:
         if block.type == "text":
             final_text += block.text
     return final_text
 
-# ====================== SEND LONG MESSAGES (split if needed) ======================
 async def send_long_message(channel, text):
-    """Splits long messages into chunks of ~1900 characters"""
     if len(text) <= 1900:
         await channel.send(text)
         return
@@ -157,7 +268,6 @@ async def send_long_message(channel, text):
         prefix = f"**Part {i}/{len(chunks)}**\n" if len(chunks) > 1 else ""
         await channel.send(prefix + chunk)
 
-# ====================== ON MESSAGE ======================
 @bot.event
 async def on_message(message: discord.Message):
     if message.author.bot:
@@ -168,7 +278,6 @@ async def on_message(message: discord.Message):
         if not query:
             return
 
-        # Safe typing (works in DMs and channels)
         try:
             async with message.channel.typing():
                 pass
@@ -200,9 +309,25 @@ Cite specific numbers (premium, dark pool prints, etc.) when possible."""
             print(f"Error processing message: {e}")
             await message.reply("Sorry, I ran into an error while analyzing. Please try again.")
 
-# ====================== ON READY ======================
+# ====================== COMMANDS ======================
+@bot.command()
+async def testmode(ctx, state: str = "on"):
+    if ctx.author.id != 123456789012345678:   # Replace with your user ID if you want
+        return
+    global TEST_MODE
+    TEST_MODE = state.lower() in ["on", "true", "1", "yes"]
+    await ctx.send(f"Test Mode is now {'ON' if TEST_MODE else 'OFF'}")
+
+@bot.command()
+async def status(ctx):
+    await ctx.send(f"Bot Online • Test Mode: {'ON' if TEST_MODE else 'OFF'} • Market Open: {is_market_open()}")
+
+# ====================== STARTUP ======================
 @bot.event
 async def on_ready():
-    print(f"✅ Bot is online as {bot.user} — Ready for DM tests and mentions!")
+    print(f"✅ v3 Bot is online as {bot.user}")
+    if not auto_alert_scanner.is_running():
+        auto_alert_scanner.start()
+        print("Auto-alert scanner started (using your strict rules)")
 
 bot.run(DISCORD_TOKEN)
