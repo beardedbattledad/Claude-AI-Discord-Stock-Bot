@@ -24,18 +24,17 @@ ANTHROPIC = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 TOOLS = [
     {
         "name": "get_flow_alerts",
-        "description": "Get the most recent options flow activity. Use ticker for specific symbol or leave blank for broad scan.",
+        "description": "Get the most recent options flow activity. Default = last 200 trades (no premium or time filter unless asked).",
         "input_schema": {
             "type": "object",
             "properties": {
                 "ticker": {"type": "string", "description": "Specific ticker like DVN (optional)"},
                 "since_hours": {"type": "integer", "description": "Only use if user specifically asks for a time window"},
-                "min_premium": {"type": "integer", "description": "Minimum premium in USD"},
+                "min_premium": {"type": "integer", "description": "Minimum premium — only use if user asks"},
                 "limit": {"type": "integer", "default": 200}
             }
         }
     },
-    # ... your other tools (dark_pool, congress, insider) stay exactly the same
     {
         "name": "get_dark_pool_trades",
         "description": "Get recent dark pool prints.",
@@ -62,7 +61,7 @@ TOOLS = [
     }
 ]
 
-# ====================== EXECUTE TOOL (Default = Most Recent 200 Trades) ======================
+# ====================== EXECUTE TOOL (Fixed - No Default Premium/Time) ======================
 async def execute_tool(tool_name: str, tool_input: dict):
     try:
         import httpx
@@ -72,21 +71,24 @@ async def execute_tool(tool_name: str, tool_input: dict):
         if tool_name == "get_flow_alerts":
             ticker = tool_input.get("ticker")
             limit = min(tool_input.get("limit", 200), 200)
-            since_hours = tool_input.get("since_hours")   # Only apply if user asked for it
+            since_hours = tool_input.get("since_hours")
+            min_premium = tool_input.get("min_premium")
 
             params = {"limit": limit}
 
-            # ONLY add time filter if user specifically requested it
             if since_hours is not None:
                 cutoff = (datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=since_hours)).isoformat()
                 params["newer_than"] = cutoff
+
+            if min_premium is not None:
+                params["min_premium"] = min_premium
 
             if ticker:
                 url = f"{base_url}/api/stock/{ticker.upper()}/flow-alerts"
             else:
                 url = f"{base_url}/api/option-trades/flow-alerts"
 
-            print(f"→ Calling {url} | limit={limit} | since_hours={since_hours or 'None (most recent)'}")
+            print(f"→ Calling {url} | limit={limit} | since_hours={since_hours or 'None (most recent)'} | min_premium={min_premium or 'None'}")
 
             async with httpx.AsyncClient(timeout=20.0) as client:
                 resp = await client.get(url, headers=headers, params=params)
@@ -95,15 +97,16 @@ async def execute_tool(tool_name: str, tool_input: dict):
                 data = resp.json() if resp.status_code == 200 else {"error": resp.text}
 
                 if isinstance(data, dict) and isinstance(data.get("data"), list):
+                    results = data["data"]
                     return {
-                        "count": len(data["data"]),
-                        "samples": data["data"][:150],
+                        "count": len(results),
+                        "samples": results[:150],
                         "ticker": ticker or "broad",
-                        "note": f"Most recent {len(data['data'])} trades (no time filter by default)"
+                        "note": f"Most recent {len(results)} trades (no default time or premium filter)"
                     }
                 return data
 
-        # Keep your other tools exactly as they were
+        # Keep your other tools unchanged
         elif tool_name == "get_dark_pool_trades":
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.get(f"{base_url}/api/darkpool/recent", headers=headers, params={"limit": tool_input.get("limit", 15)})
@@ -125,9 +128,9 @@ async def execute_tool(tool_name: str, tool_input: dict):
         print(f"Tool error: {str(e)}")
         return {"error": str(e)}
 
-# The rest of your code (handle_tool_loop, send_long_message, on_message, on_ready) stays EXACTLY as you had it in your last stable version.
+# ====================== The rest of your code stays EXACTLY as it was in your last stable version ======================
+# (handle_tool_loop, send_long_message, on_message, on_ready)
 
-# ====================== HANDLE TOOL LOOP ======================
 async def handle_tool_loop(response, messages):
     while response.stop_reason == "tool_use":
         tool_results = []
