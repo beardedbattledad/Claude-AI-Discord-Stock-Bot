@@ -29,12 +29,13 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "ticker": {"type": "string", "description": "Specific ticker like DVN (optional)"},
-                "since_hours": {"type": "integer", "description": "Hours to look back — only use if user specifically asks for a time window"},
+                "since_hours": {"type": "integer", "description": "Only use if user specifically asks for a time window"},
                 "min_premium": {"type": "integer", "description": "Minimum premium in USD"},
                 "limit": {"type": "integer", "default": 200}
             }
         }
     },
+    # ... your other tools (dark_pool, congress, insider) stay exactly the same
     {
         "name": "get_dark_pool_trades",
         "description": "Get recent dark pool prints.",
@@ -61,7 +62,7 @@ TOOLS = [
     }
 ]
 
-# ====================== EXECUTE TOOL (Default = Last 200 Trades) ======================
+# ====================== EXECUTE TOOL (Default = Most Recent 200 Trades) ======================
 async def execute_tool(tool_name: str, tool_input: dict):
     try:
         import httpx
@@ -70,13 +71,13 @@ async def execute_tool(tool_name: str, tool_input: dict):
 
         if tool_name == "get_flow_alerts":
             ticker = tool_input.get("ticker")
-            limit = min(tool_input.get("limit", 200), 200)   # Max ~200 per call
-            since_hours = tool_input.get("since_hours")
+            limit = min(tool_input.get("limit", 200), 200)
+            since_hours = tool_input.get("since_hours")   # Only apply if user asked for it
 
             params = {"limit": limit}
 
-            # Only apply time filter if user specifically asked for it
-            if since_hours:
+            # ONLY add time filter if user specifically requested it
+            if since_hours is not None:
                 cutoff = (datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=since_hours)).isoformat()
                 params["newer_than"] = cutoff
 
@@ -96,13 +97,13 @@ async def execute_tool(tool_name: str, tool_input: dict):
                 if isinstance(data, dict) and isinstance(data.get("data"), list):
                     return {
                         "count": len(data["data"]),
-                        "samples": data["data"][:150],   # Safe amount for Claude
+                        "samples": data["data"][:150],
                         "ticker": ticker or "broad",
-                        "note": f"Most recent {len(data['data'])} trades"
+                        "note": f"Most recent {len(data['data'])} trades (no time filter by default)"
                     }
                 return data
 
-        # Keep your other tools unchanged
+        # Keep your other tools exactly as they were
         elif tool_name == "get_dark_pool_trades":
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.get(f"{base_url}/api/darkpool/recent", headers=headers, params={"limit": tool_input.get("limit", 15)})
@@ -124,9 +125,9 @@ async def execute_tool(tool_name: str, tool_input: dict):
         print(f"Tool error: {str(e)}")
         return {"error": str(e)}
 
-# ====================== HANDLE TOOL LOOP, SEND LONG MESSAGES, ON MESSAGE, ON READY ======================
-# (Exactly the same as your last stable version)
+# The rest of your code (handle_tool_loop, send_long_message, on_message, on_ready) stays EXACTLY as you had it in your last stable version.
 
+# ====================== HANDLE TOOL LOOP ======================
 async def handle_tool_loop(response, messages):
     while response.stop_reason == "tool_use":
         tool_results = []
