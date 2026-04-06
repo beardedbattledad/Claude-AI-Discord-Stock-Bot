@@ -24,13 +24,14 @@ ANTHROPIC = AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 TOOLS = [
     {
         "name": "get_flow_alerts",
-        "description": "Get recent options flow activity. Use this for broad scanning of unusual or large options trades.",
+        "description": "Get the most recent options flow activity. Use ticker for specific symbol or leave blank for broad scan.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "since_hours": {"type": "integer", "description": "Hours to look back (default 2)"},
-                "min_premium": {"type": "integer", "description": "Minimum premium in USD (default 100000)"},
-                "limit": {"type": "integer", "default": 30}
+                "ticker": {"type": "string", "description": "Specific ticker like DVN (optional)"},
+                "since_hours": {"type": "integer", "description": "Hours to look back — only use if user specifically asks for a time window"},
+                "min_premium": {"type": "integer", "description": "Minimum premium in USD"},
+                "limit": {"type": "integer", "default": 200}
             }
         }
     },
@@ -60,7 +61,7 @@ TOOLS = [
     }
 ]
 
-# ====================== EXECUTE TOOL (with truncation) ======================
+# ====================== EXECUTE TOOL (Default = Last 200 Trades) ======================
 async def execute_tool(tool_name: str, tool_input: dict):
     try:
         import httpx
@@ -69,13 +70,13 @@ async def execute_tool(tool_name: str, tool_input: dict):
 
         if tool_name == "get_flow_alerts":
             ticker = tool_input.get("ticker")
-            limit = min(tool_input.get("limit", 200), 200)   # Max per call is ~200
+            limit = min(tool_input.get("limit", 200), 200)   # Max ~200 per call
             since_hours = tool_input.get("since_hours")
 
             params = {"limit": limit}
 
+            # Only apply time filter if user specifically asked for it
             if since_hours:
-                # User specifically asked for a time window
                 cutoff = (datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=since_hours)).isoformat()
                 params["newer_than"] = cutoff
 
@@ -84,7 +85,7 @@ async def execute_tool(tool_name: str, tool_input: dict):
             else:
                 url = f"{base_url}/api/option-trades/flow-alerts"
 
-            print(f"→ Calling {url} | limit={limit} | since_hours={since_hours}")
+            print(f"→ Calling {url} | limit={limit} | since_hours={since_hours or 'None (most recent)'}")
 
             async with httpx.AsyncClient(timeout=20.0) as client:
                 resp = await client.get(url, headers=headers, params=params)
@@ -93,28 +94,39 @@ async def execute_tool(tool_name: str, tool_input: dict):
                 data = resp.json() if resp.status_code == 200 else {"error": resp.text}
 
                 if isinstance(data, dict) and isinstance(data.get("data"), list):
-                    results = data["data"]
                     return {
-                        "count": len(results),
-                        "samples": results[:150],   # Send up to 150 to Claude (safe limit)
+                        "count": len(data["data"]),
+                        "samples": data["data"][:150],   # Safe amount for Claude
                         "ticker": ticker or "broad",
-                        "note": f"Most recent {len(results)} trades (max per call ~200)"
+                        "note": f"Most recent {len(data['data'])} trades"
                     }
                 return data
 
-        # Keep your other tools (dark_pool, congress, insider) unchanged
+        # Keep your other tools unchanged
         elif tool_name == "get_dark_pool_trades":
-            # ... your existing code for this tool
-            pass
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(f"{base_url}/api/darkpool/recent", headers=headers, params={"limit": tool_input.get("limit", 15)})
+                data = resp.json() if resp.status_code == 200 else {"error": resp.text}
+                return {"count": len(data) if isinstance(data, list) else 0, "samples": data[:6] if isinstance(data, list) else data}
 
-        # ... same for congress and insider
+        elif tool_name == "get_congress_trades":
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(f"{base_url}/api/congress/recent-trades", headers=headers, params={"limit": tool_input.get("limit", 10)})
+                return resp.json() if resp.status_code == 200 else {"error": resp.text}
+
+        elif tool_name == "get_insider_trades":
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(f"{base_url}/api/insider/transactions", headers=headers, params={"limit": tool_input.get("limit", 10)})
+                return resp.json() if resp.status_code == 200 else {"error": resp.text}
 
         return {"error": f"Unknown tool: {tool_name}"}
     except Exception as e:
         print(f"Tool error: {str(e)}")
         return {"error": str(e)}
 
-# ====================== HANDLE TOOL LOOP ======================
+# ====================== HANDLE TOOL LOOP, SEND LONG MESSAGES, ON MESSAGE, ON READY ======================
+# (Exactly the same as your last stable version)
+
 async def handle_tool_loop(response, messages):
     while response.stop_reason == "tool_use":
         tool_results = []
@@ -131,30 +143,27 @@ async def handle_tool_loop(response, messages):
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": tool_use_id,
-                    "content": json.dumps(result, default=str)[:15000]  # Hard cap to prevent overflow
+                    "content": json.dumps(result, default=str)[:15000]
                 })
 
         messages.append({"role": "assistant", "content": response.content})
         messages.append({"role": "user", "content": tool_results})
 
         response = await ANTHROPIC.messages.create(
-            model="claude-sonnet-4-6",          # Current stable model
+            model="claude-sonnet-4-6",
             max_tokens=1000,
             temperature=0.4,
             tools=TOOLS,
             messages=messages
         )
 
-    # Extract final text
     final_text = ""
     for block in response.content:
         if block.type == "text":
             final_text += block.text
     return final_text
 
-# ====================== SEND LONG MESSAGES (split if needed) ======================
 async def send_long_message(channel, text):
-    """Splits long messages into chunks of ~1900 characters"""
     if len(text) <= 1900:
         await channel.send(text)
         return
@@ -164,7 +173,6 @@ async def send_long_message(channel, text):
         prefix = f"**Part {i}/{len(chunks)}**\n" if len(chunks) > 1 else ""
         await channel.send(prefix + chunk)
 
-# ====================== ON MESSAGE ======================
 @bot.event
 async def on_message(message: discord.Message):
     if message.author.bot:
@@ -175,7 +183,6 @@ async def on_message(message: discord.Message):
         if not query:
             return
 
-        # Safe typing (works in DMs and channels)
         try:
             async with message.channel.typing():
                 pass
@@ -207,7 +214,6 @@ Cite specific numbers (premium, dark pool prints, etc.) when possible."""
             print(f"Error processing message: {e}")
             await message.reply("Sorry, I ran into an error while analyzing. Please try again.")
 
-# ====================== ON READY ======================
 @bot.event
 async def on_ready():
     print(f"✅ Bot is online as {bot.user} — Ready for DM tests and mentions!")
