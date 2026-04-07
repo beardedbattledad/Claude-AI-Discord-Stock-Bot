@@ -1,0 +1,41 @@
+import os
+import json
+from dotenv import load_dotenv
+import httpx
+import asyncio
+
+load_dotenv()
+
+UW_API_KEY = os.getenv("UW_API_KEY")
+
+if not UW_API_KEY:
+    print("ERROR: UW_API_KEY not found in .env")
+    exit(1)
+
+# Your exact custom alert names
+CUSTOM_ALERT_NAMES = ["AI Mid Cap", "AI Small Cap", "AI ETF", "AI Mega Cap"]
+
+async def debug_dump():
+    print("=== Starting Unusual Whales Custom Alerts Debug Dump ===\n")
+
+    # Step 1: Load alert configurations
+    print("1. Fetching alert configurations...")
+    try:
+        headers = {"Authorization": f"Bearer {UW_API_KEY}"}
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get("https://api.unusualwhales.com/api/alerts/configuration", headers=headers)
+            print(f"   Configs Status: {resp.status_code}")
+
+            if resp.status_code != 200:
+                print(f"   Error: {resp.text[:500]}")
+                return
+
+            data = resp.json()
+            configs = data.get("data", [])
+            print(f"   Found {len(configs)} total alert configs")
+
+            matching = []
+            for alert in configs:
+                name = alert.get("name")
+                aid = alert.get("id")
+                if name and aid and name in CUSTOM_ALERT_NAMES
