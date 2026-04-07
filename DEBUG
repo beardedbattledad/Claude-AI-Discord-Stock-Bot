@@ -12,13 +12,11 @@ if not UW_API_KEY:
     print("ERROR: UW_API_KEY not found in .env")
     exit(1)
 
-# Your exact custom alert names
 CUSTOM_ALERT_NAMES = ["AI Mid Cap", "AI Small Cap", "AI ETF", "AI Mega Cap"]
 
 async def debug_dump():
     print("=== Starting Unusual Whales Custom Alerts Debug Dump ===\n")
 
-    # Step 1: Load alert configurations
     print("1. Fetching alert configurations...")
     try:
         headers = {"Authorization": f"Bearer {UW_API_KEY}"}
@@ -45,7 +43,7 @@ async def debug_dump():
             print(f"   Loaded {len(matching)} matching custom alerts: {[n for n, _ in matching]}")
 
             if not matching:
-                print("   No matching alerts found. Check exact names in Unusual Whales dashboard.")
+                print("   No matching alerts found.")
                 return
 
             config_ids = [aid for _, aid in matching]
@@ -54,8 +52,7 @@ async def debug_dump():
         print(f"   Config fetch failed: {e}")
         return
 
-    # Step 2: Fetch triggered alerts
-    print("\n2. Fetching triggered alerts from your custom filters...")
+    print("\n2. Fetching triggered alerts...")
     try:
         base_url = "https://api.unusualwhales.com"
         params = {"limit": 50}
@@ -74,7 +71,6 @@ async def debug_dump():
             trades = data.get("data", []) if isinstance(data, dict) else []
             print(f"   Received {len(trades)} triggered trades\n")
 
-            # FULL RAW JSON DUMP
             print("=== FULL RAW JSON DUMP (first 5 trades) ===")
             for i, trade in enumerate(trades[:5]):
                 print(f"\n--- Trade {i+1} ---")
